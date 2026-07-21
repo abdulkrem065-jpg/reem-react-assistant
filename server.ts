@@ -173,6 +173,81 @@ ${kbText}
   }
 });
 
+// API: Send WhatsApp Message via Twilio
+app.post("/api/whatsapp/send", async (req, res) => {
+  try {
+    const { to, message, credentials } = req.body;
+
+    const accountSid = credentials?.accountSid || process.env.TWILIO_ACCOUNT_SID;
+    const authToken = credentials?.authToken || process.env.TWILIO_AUTH_TOKEN;
+    const fromNumber = credentials?.fromNumber || process.env.TWILIO_FROM_NUMBER;
+
+    if (!to || !message) {
+      return res.status(400).json({ error: "الرجاء إدخال رقم المستلم ونص الرسالة." });
+    }
+
+    if (!accountSid || !authToken || !fromNumber) {
+      return res.status(400).json({ 
+        error: "إعدادات Twilio غير مكتملة. يرجى إدخال الحساب (Account SID) والرمز (Auth Token) ورقم الإرسال في الإعدادات أو كمتغيرات بيئة." 
+      });
+    }
+
+    // Clean phone number (must be international)
+    let formattedTo = to.trim().replace(/\s+/g, "").replace(/[-()]/g, "");
+    if (!formattedTo.startsWith("+")) {
+      if (formattedTo.startsWith("00")) {
+        formattedTo = "+" + formattedTo.slice(2);
+      } else if (formattedTo.startsWith("05") || formattedTo.startsWith("5")) {
+        // Assume Saudi Arabia default country code if starts with 05 or 5
+        const cleanDigits = formattedTo.startsWith("0") ? formattedTo.slice(1) : formattedTo;
+        formattedTo = "+966" + cleanDigits;
+      } else {
+        formattedTo = "+" + formattedTo;
+      }
+    }
+
+    const toWhatsapp = `whatsapp:${formattedTo}`;
+    const fromWhatsapp = fromNumber.startsWith("whatsapp:") ? fromNumber : `whatsapp:${fromNumber}`;
+
+    const url = `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`;
+    const basicAuth = Buffer.from(`${accountSid}:${authToken}`).toString("base64");
+
+    const bodyParams = new URLSearchParams({
+      To: toWhatsapp,
+      From: fromWhatsapp,
+      Body: message
+    });
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Authorization": `Basic ${basicAuth}`,
+        "Content-Type": "application/x-www-form-urlencoded"
+      },
+      body: bodyParams.toString()
+    });
+
+    const data: any = await response.json();
+
+    if (!response.ok) {
+      console.error("Twilio API Error:", data);
+      return res.status(response.status).json({ 
+        error: data.message || "فشل إرسال رسالة الواتساب عبر Twilio." 
+      });
+    }
+
+    return res.json({ 
+      success: true, 
+      sid: data.sid, 
+      status: data.status,
+      message: "تم إرسال رسالة الواتساب بنجاح عبر Twilio!" 
+    });
+  } catch (error: any) {
+    console.error("WhatsApp Route Error:", error);
+    return res.status(500).json({ error: error.message || "حدث خطأ داخلي في الخادم." });
+  }
+});
+
 // Serve frontend assets
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {

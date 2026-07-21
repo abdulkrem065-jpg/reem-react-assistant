@@ -119,6 +119,18 @@ export default function App() {
   const [directPhone, setDirectPhone] = useState(companyConfig.phone);
   const [directWhatsapp, setDirectWhatsapp] = useState(companyConfig.whatsapp);
 
+  // Twilio Configuration States
+  const [twilioSid, setTwilioSid] = useState(() => localStorage.getItem("reem_twilio_sid") || "");
+  const [twilioToken, setTwilioToken] = useState(() => localStorage.getItem("reem_twilio_token") || "");
+  const [twilioFrom, setTwilioFrom] = useState(() => localStorage.getItem("reem_twilio_from") || "");
+
+  // WhatsApp Send States
+  const [isWaModalOpen, setIsWaModalOpen] = useState(false);
+  const [waTargetLead, setWaTargetLead] = useState<Lead | null>(null);
+  const [waMessage, setWaMessage] = useState("");
+  const [isWaSending, setIsWaSending] = useState(false);
+  const [waError, setWaError] = useState("");
+
   // Refs
   const chatEndRef = useRef<HTMLDivElement>(null);
   const callTimerRef = useRef<any>(null);
@@ -143,6 +155,18 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem("reem_gcal_synced", String(isGoogleCalendarSynced));
   }, [isGoogleCalendarSynced]);
+
+  useEffect(() => {
+    localStorage.setItem("reem_twilio_sid", twilioSid);
+  }, [twilioSid]);
+
+  useEffect(() => {
+    localStorage.setItem("reem_twilio_token", twilioToken);
+  }, [twilioToken]);
+
+  useEffect(() => {
+    localStorage.setItem("reem_twilio_from", twilioFrom);
+  }, [twilioFrom]);
 
   // Handle HTML document theme and layout direction
   useEffect(() => {
@@ -449,6 +473,60 @@ export default function App() {
     setCalendarEvents(prev => [...prev, newEvent]);
     setIsEventModalOpen(false);
     setEventForm({ date: "", time: "", title: "", notes: "", leadId: "" });
+  };
+
+  // --- WhatsApp Twilio API Handlers ---
+  const openWhatsAppModal = (lead: Lead) => {
+    setWaTargetLead(lead);
+    setWaError("");
+    
+    let defaultTemplate = "";
+    if (lead.requestType === "عرض سعر") {
+      defaultTemplate = `مرحباً أستاذ ${lead.name}، معك ريم من شركة *${companyConfig.name}*.\n\nبناءً على طلبك للحصول على عرض سعر لخدمة (${lead.serviceType})، يسعدنا إخبارك بأن العرض المقترح المبدئي هو: *${lead.suggestedQuote}*.\n\nسيتواصل معك فريق المبيعات قريباً لتأكيد التفاصيل النهائية وتزويدك بالعرض الرسمي.`;
+    } else if (lead.requestType === "حجز موعد") {
+      defaultTemplate = `مرحباً أستاذ ${lead.name}، معك ريم من شركة *${companyConfig.name}*.\n\nلقد تم جدولة موعد متابعة لطلبك (${lead.serviceType}).\n\nفريق المبيعات والمتابعة جاهز لخدمتك والرد على استفسارك قريباً.`;
+    } else {
+      defaultTemplate = `مرحباً أستاذ ${lead.name}، معك ريم من شركة *${companyConfig.name}*.\n\nنشكرك على تواصلك معنا بخصوص (${lead.serviceType}). لقد استلمنا رسالتك وسنقوم بالرد عليك في أقرب وقت ممكن خلال ساعات العمل الرسمية.`;
+    }
+    
+    setWaMessage(defaultTemplate);
+    setIsWaModalOpen(true);
+  };
+
+  const handleSendWhatsAppMessage = async () => {
+    if (!waTargetLead || !waMessage.trim()) return;
+    setIsWaSending(true);
+    setWaError("");
+
+    try {
+      const response = await fetch("/api/whatsapp/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          to: waTargetLead.mobile,
+          message: waMessage,
+          credentials: {
+            accountSid: twilioSid,
+            authToken: twilioToken,
+            fromNumber: twilioFrom
+          }
+        })
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "فشل إرسال الرسالة");
+      }
+
+      alert("تم إرسال رسالة الواتساب للعميل بنجاح عبر Twilio!");
+      setIsWaModalOpen(false);
+      setWaTargetLead(null);
+    } catch (err: any) {
+      console.error(err);
+      setWaError(err.message || "حدث خطأ غير متوقع أثناء إرسال الرسالة.");
+    } finally {
+      setIsWaSending(false);
+    }
   };
 
   // --- CRM Update notes / status ---
@@ -1028,6 +1106,15 @@ export default function App() {
                         {/* Quick Contact & Action Buttons */}
                         <div className="flex items-center gap-2">
                           <button
+                            onClick={() => openWhatsAppModal(lead)}
+                            className="p-2 bg-emerald-100 hover:bg-emerald-200 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-400 rounded-xl text-xs font-semibold flex items-center gap-1 transition-all"
+                            title="إرسال رسالة واتساب عبر Twilio"
+                          >
+                            <MessageSquare className="w-3.5 h-3.5" />
+                            <span className="hidden md:inline">إرسال واتساب</span>
+                          </button>
+
+                          <button
                             onClick={() => {
                               setEventForm(prev => ({ ...prev, leadId: lead.id, title: `موعد متابعة: ${lead.name}` }));
                               setIsEventModalOpen(true);
@@ -1406,6 +1493,75 @@ export default function App() {
                 </form>
               </div>
 
+              {/* Twilio WhatsApp Integration configuration */}
+              <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-6 rounded-3xl shadow-sm space-y-5">
+                <div className="flex items-center gap-2 pb-3 border-b border-slate-100 dark:border-slate-800">
+                  <div className="bg-emerald-500 text-white p-2 rounded-xl">
+                    <MessageSquare className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-sm text-slate-800 dark:text-white">
+                      إعدادات بوابة Twilio WhatsApp
+                    </h3>
+                    <p className="text-[10px] text-slate-400 mt-0.5">
+                      قم بتهيئة بيانات حساب Twilio الخاص بك لإرسال رسائل WhatsApp مباشرة للعملاء من لوحة التحكم.
+                    </p>
+                  </div>
+                </div>
+
+                <form className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs" onSubmit={(e) => { e.preventDefault(); alert("تم حفظ إعدادات Twilio بنجاح!"); }}>
+                  <div className="space-y-1">
+                    <label className="block font-semibold text-slate-600 dark:text-slate-300">معرّف الحساب (Account SID)</label>
+                    <input
+                      type="text"
+                      value={twilioSid}
+                      onChange={(e) => setTwilioSid(e.target.value)}
+                      placeholder="AC..."
+                      disabled={role !== "admin"}
+                      className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800 font-mono"
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="block font-semibold text-slate-600 dark:text-slate-300">رمز المصادقة (Auth Token)</label>
+                    <input
+                      type="password"
+                      value={twilioToken}
+                      onChange={(e) => setTwilioToken(e.target.value)}
+                      placeholder="••••••••••••••••••••••••••••••••"
+                      disabled={role !== "admin"}
+                      className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800 font-mono"
+                    />
+                  </div>
+
+                  <div className="space-y-1 md:col-span-2">
+                    <label className="block font-semibold text-slate-600 dark:text-slate-300">رقم الإرسال المعتمد من Twilio (Sender Number)</label>
+                    <input
+                      type="text"
+                      value={twilioFrom}
+                      onChange={(e) => setTwilioFrom(e.target.value)}
+                      placeholder="+14155238886 أو whatsapp:+14155238886"
+                      disabled={role !== "admin"}
+                      className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800 font-mono"
+                    />
+                    <p className="text-[10px] text-slate-400 mt-1">
+                      ملاحظة: إذا لم تقم بتهيئة الحقول هنا، فسيقوم النظام بمحاولة الإرسال باستخدام متغيرات البيئة التي تم تكوينها في السيرفر.
+                    </p>
+                  </div>
+
+                  {role === "admin" && (
+                    <div className="md:col-span-2 pt-2">
+                      <button
+                        type="submit"
+                        className="px-5 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white font-bold transition-all shadow-sm"
+                      >
+                        حفظ إعدادات Twilio
+                      </button>
+                    </div>
+                  )}
+                </form>
+              </div>
+
               {/* Knowledge Base Services list */}
               <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-6 rounded-3xl shadow-sm space-y-4">
                 <div className="flex justify-between items-center flex-wrap gap-2 pb-3 border-b border-slate-100 dark:border-slate-800">
@@ -1592,6 +1748,85 @@ export default function App() {
                 <button type="submit" className="px-4 py-2 bg-emerald-500 text-white font-bold rounded-xl">{t.confirmSchedule}</button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* --- POPUP MODAL: WHATSAPP MESSAGE COMPOSER --- */}
+      {isWaModalOpen && waTargetLead && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" dir={lang === "ar" ? "rtl" : "ltr"}>
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 max-w-lg w-full space-y-4 shadow-xl">
+            <div className="flex items-center gap-2 pb-2 border-b dark:border-slate-800">
+              <div className="bg-emerald-500 text-white p-1.5 rounded-lg">
+                <MessageSquare className="w-4 h-4" />
+              </div>
+              <h3 className="font-bold text-base text-slate-800 dark:text-white">إرسال رسالة واتساب رسمية (Twilio)</h3>
+            </div>
+
+            <div className="space-y-3.5 text-xs">
+              <div className="grid grid-cols-2 gap-3 bg-slate-50 dark:bg-slate-800/50 p-3 rounded-2xl border dark:border-slate-800">
+                <div>
+                  <span className="text-slate-400 block font-medium">العميل المستلم</span>
+                  <strong className="text-slate-800 dark:text-white text-sm">{waTargetLead.name}</strong>
+                </div>
+                <div>
+                  <span className="text-slate-400 block font-medium">رقم الجوال</span>
+                  <strong className="text-slate-800 dark:text-white text-sm font-mono">{waTargetLead.mobile}</strong>
+                </div>
+              </div>
+
+              {waError && (
+                <div className="p-3 bg-red-50 dark:bg-red-950/20 text-red-600 dark:text-red-400 border border-red-200 dark:border-red-900/50 rounded-xl">
+                  {waError}
+                </div>
+              )}
+
+              <div className="space-y-1">
+                <label className="block font-semibold text-slate-600 dark:text-slate-300">نص الرسالة</label>
+                <textarea
+                  required
+                  value={waMessage}
+                  onChange={(e) => setWaMessage(e.target.value)}
+                  className="w-full p-3 rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800 h-44 text-slate-800 dark:text-slate-100 leading-relaxed focus:ring-1 focus:ring-emerald-500 focus:outline-hidden"
+                  placeholder="اكتب رسالتك هنا..."
+                />
+                <p className="text-[10px] text-slate-400">يمكنك تعديل الرسالة كما ترغب قبل الإرسال الفعلي.</p>
+              </div>
+
+              <div className="flex justify-between items-center pt-2">
+                <div className="text-[10px] text-slate-400">
+                  سيتم الإرسال من رقم Twilio المعتمد في الإعدادات.
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => { setIsWaModalOpen(false); setWaTargetLead(null); }}
+                    className="px-4 py-2 border dark:border-slate-800 rounded-xl text-slate-700 dark:text-slate-300 font-medium"
+                    disabled={isWaSending}
+                  >
+                    إلغاء
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSendWhatsAppMessage}
+                    disabled={isWaSending}
+                    className="px-5 py-2 bg-emerald-500 hover:bg-emerald-600 disabled:bg-emerald-400 text-white font-bold rounded-xl flex items-center gap-1.5 shadow-sm"
+                  >
+                    {isWaSending ? (
+                      <>
+                        <span className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+                        جاري الإرسال...
+                      </>
+                    ) : (
+                      <>
+                        <MessageSquare className="w-3.5 h-3.5" />
+                        إرسال الآن
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       )}
