@@ -6,9 +6,8 @@ from twilio.twiml.messaging_response import MessagingResponse
 
 app = Flask(__name__)
 
-# إعداد العميل لـ Gemini
-api_key = os.getenv("GEMINI_API_KEY")
-client = genai.Client(api_key=api_key) if api_key else genai.Client()
+# إعداد العميل لـ Gemini باستخدام المكتبة الجديدة google-genai
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 # النظام التوجيهي لـ "ريم" (هوية مؤسسة الذيباني)
 SYSTEM_PROMPT = """
