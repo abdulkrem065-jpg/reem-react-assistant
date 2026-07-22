@@ -1,14 +1,14 @@
 import os
 from flask import Flask, request
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from twilio.twiml.messaging_response import MessagingResponse
 
 app = Flask(__name__)
 
-# إعداد مفتاح API
-GEMINI_KEY = os.getenv("GEMINI_API_KEY")
-if GEMINI_KEY:
-    genai.configure(api_key=GEMINI_KEY)
+# إعداد العميل لـ Gemini
+api_key = os.getenv("GEMINI_API_KEY")
+client = genai.Client(api_key=api_key) if api_key else genai.Client()
 
 # النظام التوجيهي لـ "ريم" (هوية مؤسسة الذيباني)
 SYSTEM_PROMPT = """
@@ -40,11 +40,17 @@ def webhook():
             resp.message("أهلاً بك! كيف يمكنني مساعدتك اليوم؟")
             return str(resp)
 
-        # استدعاء موديل gemini-1.5-flash مع التعليمات النظامية للحفاظ على هوية ريم
+        # استدعاء موديل gemini-1.5-flash باستخدام المكتبة الجديدة google-genai
         try:
-            model = genai.GenerativeModel('gemini-1.5-flash', system_instruction=SYSTEM_PROMPT)
-            response = model.generate_content(incoming_msg)
-            reply_text = response.text if response and hasattr(response, 'text') else "تم استلام رسالتك بنجاح."
+            config = types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT
+            )
+            response = client.models.generate_content(
+                model='gemini-1.5-flash',
+                contents=incoming_msg,
+                config=config,
+            )
+            reply_text = response.text if response and hasattr(response, 'text') and response.text else "تم استلام رسالتك بنجاح."
         except Exception as gemini_err:
             print(f"Detailed Gemini API Error: {type(gemini_err).__name__}: {gemini_err}")
             reply_text = "أهلاً بك! تم استلام رسالتك وسيتم المتابعة والرد عليك من فريق العمل."
