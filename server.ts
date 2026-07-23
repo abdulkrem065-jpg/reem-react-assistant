@@ -31,11 +31,15 @@ const ai = new GoogleGenAI({
 });
 
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 // Baileys WhatsApp Connection State
 let waSock: ReturnType<typeof makeWASocket> | null = null;
 let waConnectionStatus: "connecting" | "connected" | "disconnected" = "disconnected";
 let currentQrCode: string | null = null;
+let currentPairingCode: string | null = null;
+let currentPairingPhone: string | null = null;
+let pairingError: string | null = null;
 
 // Baileys WhatsApp Client Initialization
 async function connectToWhatsApp() {
@@ -80,7 +84,9 @@ async function connectToWhatsApp() {
       } else if (connection === "open") {
         waConnectionStatus = "connected";
         currentQrCode = null;
-        console.log("✅ WhatsApp Baileys connected successfully!");
+        currentPairingCode = null;
+        pairingError = null;
+        console.log("✅ تم ربط ريم بنجاح! (WhatsApp Baileys connected successfully)");
       } else if (connection === "connecting") {
         waConnectionStatus = "connecting";
       }
@@ -309,7 +315,303 @@ app.get("/api/whatsapp/status", (req, res) => {
   res.json({
     status: waConnectionStatus,
     qr: currentQrCode,
+    pairingCode: currentPairingCode,
+    pairingPhone: currentPairingPhone,
   });
+});
+
+// Helper function to generate pairing code
+async function generatePairingCode(phoneNumber: string): Promise<string> {
+  const cleanPhone = phoneNumber.replace(/[^0-9]/g, "");
+  if (!cleanPhone || cleanPhone.length < 8) {
+    throw new Error("يرجى إدخال رقم هاتف صحيح شامل المفتاح الدولي (مثال: 966500000000)");
+  }
+
+  if (!waSock) {
+    await connectToWhatsApp();
+  }
+
+  if (!waSock) {
+    throw new Error("عذراً، تعذر الاتصال بمحرك الواتساب.");
+  }
+
+  const code = await waSock.requestPairingCode(cleanPhone);
+  currentPairingCode = code;
+  currentPairingPhone = cleanPhone;
+  pairingError = null;
+  return code;
+}
+
+// API: Request WhatsApp Pairing Code
+app.post("/api/whatsapp/pair", async (req, res) => {
+  try {
+    const phoneNumber = req.body.phoneNumber || req.body.phone;
+    if (!phoneNumber) {
+      return res.status(400).json({ error: "رقم الهاتف مطلوب" });
+    }
+    const code = await generatePairingCode(phoneNumber);
+    res.json({
+      success: true,
+      pairingCode: code,
+      phoneNumber: currentPairingPhone,
+      message: "تم توليد كود الاقتران بنجاح",
+    });
+  } catch (error: any) {
+    console.error("Error generating pairing code:", error);
+    pairingError = error?.message || "فشل توليد كود الاقتران";
+    res.status(500).json({ error: pairingError });
+  }
+});
+
+// Endpoint: HTML Page for WhatsApp Pairing Code (/pair)
+const renderPairPage = (req: express.Request, res: express.Response) => {
+  const isConnected = waConnectionStatus === "connected";
+  const formattedCode = currentPairingCode ? (currentPairingCode.match(/.{1,4}/g)?.join(" - ") || currentPairingCode) : null;
+
+  const html = `
+    <!DOCTYPE html>
+    <html lang="ar" dir="rtl">
+    <head>
+      <meta charset="UTF-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <title>ربط الواتساب عبر كود الرقم - ريم المساعدة الذكية</title>
+      <meta http-equiv="refresh" content="6" />
+      <style>
+        * { box-sizing: border-box; }
+        body {
+          font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+          background-color: #0F172A;
+          color: #F8FAFC;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          min-height: 100vh;
+          margin: 0;
+          padding: 20px;
+        }
+        .card {
+          background: #1E293B;
+          width: 100%;
+          max-width: 480px;
+          padding: 32px 24px;
+          border-radius: 24px;
+          box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+          border: 1px solid #334155;
+          text-align: center;
+        }
+        .badge {
+          display: inline-block;
+          padding: 6px 16px;
+          border-radius: 9999px;
+          font-size: 13px;
+          font-weight: 700;
+          margin-bottom: 24px;
+        }
+        .badge-connected { background-color: #059669; color: #ECFDF5; }
+        .badge-connecting { background-color: #D97706; color: #FFFBEB; }
+        .badge-disconnected { background-color: #DC2626; color: #FEF2F2; }
+        
+        .code-container {
+          background: #090D16;
+          border: 2px solid #2563EB;
+          border-radius: 16px;
+          padding: 24px 16px;
+          margin: 20px 0;
+          position: relative;
+        }
+        .code-label {
+          font-size: 13px;
+          color: #94A3B8;
+          margin-bottom: 8px;
+          font-weight: 600;
+        }
+        .code-display {
+          font-family: 'Courier New', Courier, monospace;
+          font-size: 38px;
+          font-weight: 900;
+          letter-spacing: 4px;
+          color: #38BDF8;
+          text-shadow: 0 0 15px rgba(56, 189, 248, 0.4);
+          user-select: all;
+          margin: 8px 0;
+        }
+        .phone-label {
+          font-size: 14px;
+          color: #CBD5E1;
+          margin-top: 8px;
+        }
+        .btn-copy {
+          background: #2563EB;
+          color: #FFFFFF;
+          border: none;
+          padding: 10px 20px;
+          border-radius: 10px;
+          font-size: 14px;
+          font-weight: 700;
+          cursor: pointer;
+          margin-top: 12px;
+          transition: all 0.2s;
+        }
+        .btn-copy:hover { background: #1D4ED8; }
+        
+        .instructions {
+          background: #0F172A;
+          border: 1px solid #334155;
+          border-radius: 16px;
+          padding: 16px;
+          text-align: right;
+          margin-top: 20px;
+          font-size: 13px;
+          line-height: 1.7;
+          color: #CBD5E1;
+        }
+        .instructions h4 {
+          margin: 0 0 8px 0;
+          color: #38BDF8;
+          font-size: 14px;
+        }
+        .instructions ol {
+          margin: 0;
+          padding-right: 20px;
+        }
+        .instructions li { margin-bottom: 6px; }
+
+        .form-group {
+          margin-top: 20px;
+          text-align: right;
+        }
+        .form-group label {
+          display: block;
+          font-size: 13px;
+          color: #94A3B8;
+          margin-bottom: 8px;
+          font-weight: 600;
+        }
+        .form-input {
+          width: 100%;
+          padding: 12px 16px;
+          border-radius: 12px;
+          border: 1px solid #475569;
+          background: #0F172A;
+          color: #FFFFFF;
+          font-size: 16px;
+          direction: ltr;
+          text-align: center;
+        }
+        .form-input:focus {
+          outline: none;
+          border-color: #38BDF8;
+        }
+        .btn-submit {
+          width: 100%;
+          background: #059669;
+          color: #FFFFFF;
+          border: none;
+          padding: 14px;
+          border-radius: 12px;
+          font-size: 16px;
+          font-weight: 700;
+          cursor: pointer;
+          margin-top: 12px;
+          transition: all 0.2s;
+        }
+        .btn-submit:hover { background: #047857; }
+        
+        .error-box {
+          background: #7F1D1D;
+          color: #FCA5A5;
+          padding: 12px;
+          border-radius: 10px;
+          margin-top: 16px;
+          font-size: 13px;
+        }
+        .success-box {
+          background: #064E3B;
+          color: #A7F3D0;
+          padding: 24px;
+          border-radius: 16px;
+          border: 1px solid #059669;
+          margin: 20px 0;
+        }
+      </style>
+    </head>
+    <body>
+      <div class="card">
+        <h1 style="font-size:22px; margin:0 0 6px 0;">🔑 ربط الواتساب عبر Pairing Code</h1>
+        <p style="color:#94A3B8; font-size:13px; margin:0 0 20px 0;">خدمة عملاء "ريم" - الاقتران السريع باستخدام كود الرقم</p>
+
+        <div class="badge ${
+          isConnected ? "badge-connected" : waConnectionStatus === "connecting" ? "badge-connecting" : "badge-disconnected"
+        }">
+          حالة الاتصال: ${
+            isConnected ? "متصل 🟢" : waConnectionStatus === "connecting" ? "جاري الاتصال... 🟡" : "غير متصل 🔴"
+          }
+        </div>
+
+        ${
+          isConnected
+            ? `
+              <div class="success-box">
+                <h2 style="margin:0 0 10px 0; font-size:20px;">🎉 تم ربط ريم بنجاح!</h2>
+                <p style="margin:0; font-size:14px; line-height:1.6;">تم حفظ الجلسة بنجاح، المساعدة الذكية "ريم" متصلة الآن وجاهزة للرد على المحادثات واستخراج البيانات.</p>
+              </div>
+            `
+            : `
+              ${
+                formattedCode
+                  ? `
+                    <div class="code-container">
+                      <div class="code-label">كود الاقتران الخاص بـ "ريم":</div>
+                      <div class="code-display" id="pairingCode">${formattedCode}</div>
+                      <div class="phone-label">رقم الهاتف: <b>+${currentPairingPhone}</b></div>
+                      <button class="btn-copy" onclick="navigator.clipboard.writeText('${currentPairingCode}'); alert('تم نسخ الكود!');">📋 نسخ الكود</button>
+                    </div>
+
+                    <div class="instructions">
+                      <h4>📌 طريقة تفعيل الكود على تطبيق الواتساب:</h4>
+                      <ol>
+                        <li>افتح تطبيق الواتساب على هاتف ريم.</li>
+                        <li>انتقل إلى <b>الأجهزة المرتبطة</b> (Linked Devices) > <b>ربط جهاز</b>.</li>
+                        <li>اضغط على <b>"الربط باستخدام رقم الهاتف بدلاً من ذلك"</b> في الأسفل.</li>
+                        <li>أدخل الكود الظاهر أعلاه: <b style="color:#38BDF8;">${currentPairingCode}</b></li>
+                      </ol>
+                    </div>
+                  `
+                  : ""
+              }
+
+              ${pairingError ? `<div class="error-box">⚠️ ${pairingError}</div>` : ""}
+
+              <form method="POST" action="/pair" class="form-group">
+                <label>أدخل رقم هاتف ريم (مع المفتاح الدولي بدون +):</label>
+                <input type="text" name="phoneNumber" class="form-input" placeholder="مثال: 966500000000 أو 201000000000" value="${currentPairingPhone || ""}" required />
+                <button type="submit" class="btn-submit">توليد كود الاقتران (Pairing Code)</button>
+              </form>
+            `
+        }
+
+        <p style="margin-top:24px; color:#64748B; font-size:11px;">تحدث هذه الصفحة تلقائياً للتأكد من حالة الربط</p>
+      </div>
+    </body>
+    </html>
+  `;
+
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.send(html);
+};
+
+app.get("/pair", renderPairPage);
+app.post("/pair", async (req, res) => {
+  try {
+    const phoneNumber = req.body.phoneNumber || req.body.phone;
+    if (phoneNumber) {
+      await generatePairingCode(phoneNumber);
+    }
+  } catch (error: any) {
+    console.error("Pairing form submit error:", error);
+    pairingError = error?.message || "حدث خطأ أثناء توليد الكود";
+  }
+  renderPairPage(req, res);
 });
 
 // API: Serve WhatsApp QR Code as PNG Image Buffer
