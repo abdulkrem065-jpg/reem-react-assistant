@@ -30,6 +30,8 @@ export interface CompanyConfig {
   businessStart: string; // "09:00"
   businessEnd: string; // "17:00"
   weekendDays: number[]; // 0 for Sunday, 5 for Friday, 6 for Saturday, etc.
+  adminPassword?: string;
+  demoSignatureEnabled?: boolean;
 }
 
 export interface CalendarEvent {

@@ -40,6 +40,8 @@ import {
 import { motion, AnimatePresence } from "motion/react";
 
 import { GeminiChatbot } from "./components/GeminiChatbot";
+import { DemoView } from "./components/DemoView";
+import { AdminLoginModal } from "./components/AdminLoginModal";
 
 import { Lead, KBItem, CompanyConfig, CalendarEvent, Role, Theme, Language } from "./types";
 import { translations } from "./data/translations";
@@ -51,6 +53,33 @@ import {
 } from "./data/defaultData";
 
 export default function App() {
+  // --- Routing & Admin Lock States ---
+  const [currentRoute, setCurrentRoute] = useState<"demo" | "admin">(() => {
+    return window.location.pathname === "/demo" ? "demo" : "admin";
+  });
+
+  const [isAdminAuthenticated, setIsAdminAuthenticated] = useState<boolean>(() => {
+    return sessionStorage.getItem("reem_admin_auth") === "true";
+  });
+
+  useEffect(() => {
+    const handlePopState = () => {
+      if (window.location.pathname === "/demo") {
+        setCurrentRoute("demo");
+      } else {
+        setCurrentRoute("admin");
+      }
+    };
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  const navigateTo = (route: "demo" | "admin") => {
+    setCurrentRoute(route);
+    const path = route === "demo" ? "/demo" : "/admin";
+    window.history.pushState({}, "", path);
+  };
+
   // --- States ---
   const [lang, setLang] = useState<Language>("ar");
   const [theme, setTheme] = useState<Theme>("light");
@@ -689,8 +718,27 @@ export default function App() {
     }
   };
 
+  if (currentRoute === "demo") {
+    return (
+      <DemoView
+        companyConfig={companyConfig}
+        knowledgeBase={kbItems}
+        onGoToAdmin={() => navigateTo("admin")}
+      />
+    );
+  }
+
   return (
     <div className={`min-h-screen transition-colors duration-300 ${theme === "dark" ? "bg-slate-950 text-slate-100 dark" : "bg-slate-50 text-slate-900"}`} dir={lang === "ar" ? "rtl" : "ltr"}>
+      
+      {!isAdminAuthenticated && (
+        <AdminLoginModal
+          onLoginSuccess={() => setIsAdminAuthenticated(true)}
+          onGoToDemo={() => navigateTo("demo")}
+          expectedPassword={companyConfig.adminPassword || "admin123"}
+          appName={companyConfig.name}
+        />
+      )}
       
       {/* HEADER SECTION */}
       <header className="border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-6 py-4 flex flex-wrap items-center justify-between shadow-sm">
@@ -808,6 +856,28 @@ export default function App() {
                 </div>
               )}
             </div>
+
+            {/* Demo Link button */}
+            <button
+              onClick={() => navigateTo("demo")}
+              className="px-3 py-1.5 text-xs font-bold rounded-xl bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500 hover:text-white transition-all flex items-center gap-1.5 cursor-pointer shadow-xs"
+              title="عرض الصفحة التجريبية للعملاء (/demo)"
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">الرابط التجريبي (/demo)</span>
+            </button>
+
+            {/* Lock Admin button */}
+            <button
+              onClick={() => {
+                sessionStorage.removeItem("reem_admin_auth");
+                setIsAdminAuthenticated(false);
+              }}
+              className="p-2 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-red-500 hover:text-white text-slate-700 dark:text-slate-300 transition-colors cursor-pointer"
+              title="قفل لوحة التحكم الإدارية"
+            >
+              <Shield className="w-4 h-4" />
+            </button>
 
             <button
               onClick={() => setTheme(theme === "light" ? "dark" : "light")}
@@ -1771,6 +1841,31 @@ export default function App() {
                         className="p-2 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800 font-mono text-center"
                       />
                     </div>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="block font-semibold text-slate-600 dark:text-slate-300">كلمة مرور لوحة التحكم (Admin Password)</label>
+                    <input
+                      type="text"
+                      value={companyConfig.adminPassword || "admin123"}
+                      onChange={(e) => setCompanyConfig(prev => ({ ...prev, adminPassword: e.target.value }))}
+                      disabled={role !== "admin"}
+                      className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800 font-mono"
+                    />
+                  </div>
+
+                  <div className="space-y-1 flex flex-col justify-center">
+                    <label className="block font-semibold text-slate-600 dark:text-slate-300">التوقيع التلقائي ورابط الصفحة التجريبية</label>
+                    <label className="flex items-center gap-2 cursor-pointer pt-1">
+                      <input
+                        type="checkbox"
+                        checked={companyConfig.demoSignatureEnabled ?? true}
+                        onChange={(e) => setCompanyConfig(prev => ({ ...prev, demoSignatureEnabled: e.target.checked }))}
+                        disabled={role !== "admin"}
+                        className="w-4 h-4 rounded text-emerald-500 focus:ring-emerald-500"
+                      />
+                      <span className="text-slate-700 dark:text-slate-300">إرفاق رابط الصفحة التجريبية (/demo) تلقائياً في ردود ريم</span>
+                    </label>
                   </div>
 
                   {role === "admin" && (

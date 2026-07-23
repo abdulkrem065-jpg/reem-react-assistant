@@ -128,6 +128,30 @@ async function backupSessionToCloud() {
   }, 1500);
 }
 
+// Completely clear stored session from local disk and Cloud Storage
+async function clearStoredSession() {
+  try {
+    console.log("🧹 [Session Cleanup] Clearing local auth files and Cloud Storage session...");
+    // 1. Delete local AUTH_DIR files
+    if (fs.existsSync(AUTH_DIR)) {
+      await fsPromises.rm(AUTH_DIR, { recursive: true, force: true }).catch(() => {});
+      await fsPromises.mkdir(AUTH_DIR, { recursive: true }).catch(() => {});
+    }
+
+    // 2. Delete GCS files
+    if (gcsStorage) {
+      const bucket = gcsStorage.bucket(GCS_BUCKET_NAME);
+      const [exists] = await bucket.exists().catch(() => [false]);
+      if (exists) {
+        await bucket.deleteFiles({ prefix: "baileys_auth_info/" }).catch(() => {});
+      }
+    }
+    console.log("✅ [Session Cleanup] Session store wiped successfully!");
+  } catch (err) {
+    console.error("⚠️ [Session Cleanup Error]:", err);
+  }
+}
+
 // Baileys WhatsApp Client Initialization with Persistent Session Store & Auto-Reconnect
 async function connectToWhatsApp() {
   if (isConnecting) {
@@ -181,10 +205,11 @@ async function connectToWhatsApp() {
         console.log(`⚠️ [Baileys Disconnected] Status code: ${statusCode || "unknown"}. Logged out: ${isLoggedOut}`);
 
         if (isLoggedOut) {
-          console.log("❌ Logged out from WhatsApp. Resetting current session...");
+          console.log("❌ Logged out from WhatsApp (401). Force resetting current session and wiping session files...");
           currentQrCode = null;
           currentPairingCode = null;
           waSock = null;
+          await clearStoredSession();
         } else {
           // Automatic Reconnect without clearing session state!
           const reconnectDelay = (statusCode === DisconnectReason.restartRequired || statusCode === 515) ? 1000 : 3500;
@@ -257,7 +282,12 @@ async function connectToWhatsApp() {
             },
           });
 
-          const replyText = response.text || "أهلاً بك! تم استلام رسالتك وسيتم المتابعة والرد عليك قريباً.";
+          let replyText = response.text || "أهلاً بك! تم استلام رسالتك وسيتم المتابعة والرد عليك قريباً.";
+
+          // Append demo signature link
+          if (!replyText.includes("/demo")) {
+            replyText += "\n\n🌐 يمكنك تجربة ريم المساعدة الذكية على المتصفح: /demo";
+          }
 
           // 4. Send Gemini reply directly via Baileys to WhatsApp user with quoting
           await sock.sendMessage(msg.key.remoteJid, { text: replyText }, { quoted: msg });
@@ -557,8 +587,69 @@ app.post("/api/whatsapp/pair", async (req, res) => {
   }
 });
 
-// API: Check WhatsApp Status via Direct API (/pair)
+// API: Check WhatsApp Status via Direct API or Browser (/pair)
 app.get("/pair", (req, res) => {
+  const wantsHtml = req.headers.accept?.includes("text/html") || req.query.format === "html";
+  
+  if (wantsHtml) {
+    return res.send(`
+      <!DOCTYPE html>
+      <html lang="ar" dir="rtl">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>ربط الواتساب السحابي - ريم المساعدة الذكية</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+        <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;700;900&display=swap" rel="stylesheet">
+        <style>body { font-family: 'Tajawal', sans-serif; }</style>
+      </head>
+      <body class="bg-slate-950 text-slate-100 min-h-screen flex items-center justify-center p-4">
+        <div className="max-w-md w-full bg-slate-900 border border-slate-800 rounded-3xl p-6 space-y-6 shadow-2xl">
+          <div class="text-center space-y-2">
+            <div class="inline-flex p-3 rounded-2xl bg-emerald-500 text-white shadow-lg shadow-emerald-500/20">
+              <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"></path></svg>
+            </div>
+            <h1 class="text-xl font-bold text-white">ربط الواتساب السحابي (24/7)</h1>
+            <p class="text-xs text-slate-400">أدخل رقم الهاتف الدولي لتوليد كود الاقتران المباشر</p>
+          </div>
+
+          <div class="p-4 rounded-2xl ${waConnectionStatus === 'connected' ? 'bg-emerald-950/60 border border-emerald-800/50 text-emerald-300' : 'bg-slate-800 border border-slate-700 text-slate-300'} text-xs text-center font-bold">
+            حالة الاتصال الحالية: ${waConnectionStatus === 'connected' ? 'متصل بنجاح 🟢' : 'غير متصل 🔴'}
+          </div>
+
+          ${currentPairingCode ? `
+            <div class="p-4 bg-emerald-950/80 border border-emerald-500/40 rounded-2xl text-center space-y-1">
+              <span class="text-[11px] text-emerald-400 font-bold">كود الاقتران لـ ${currentPairingPhone}:</span>
+              <div class="text-3xl font-mono font-extrabold text-white tracking-widest">${currentPairingCode}</div>
+              <p class="text-[10px] text-slate-400 pt-1">ادخل إلى واتساب > الأجهزة المرتبطة > الربط برقم الهاتف وأدخل الكود</p>
+            </div>
+          ` : ''}
+
+          <form action="/pair" method="POST" class="space-y-4">
+            <div>
+              <label class="block text-xs font-bold text-slate-300 mb-1">رقم الهاتف (مع الرمز الدولي بدون +):</label>
+              <input type="text" name="phoneNumber" required placeholder="مثال: 966501234567" class="w-full p-3 rounded-xl bg-slate-800 border border-slate-700 text-white text-sm font-mono focus:ring-2 focus:ring-emerald-500 focus:outline-none" value="${currentPairingPhone || ''}" />
+            </div>
+            <button type="submit" class="w-full py-3 bg-emerald-500 hover:bg-emerald-600 text-white font-bold rounded-xl text-sm transition-all shadow-lg shadow-emerald-500/20 cursor-pointer">
+              توليد كود الاقتران الآن 🚀
+            </button>
+          </form>
+
+          <form action="/api/reset-session" method="POST" class="pt-1">
+            <button type="submit" class="w-full py-2 bg-red-950/60 hover:bg-red-900/80 border border-red-800/50 text-red-300 font-bold rounded-xl text-xs transition-all cursor-pointer">
+              🧹 مسح بيانات الجلسة السابقة (Force Reset Session)
+            </button>
+          </form>
+
+          <div class="pt-2 border-t border-slate-800 text-center">
+            <a href="/demo" class="text-xs text-emerald-400 font-bold hover:underline">الذهاب للنسخة التجريبية (/demo) ←</a>
+          </div>
+        </div>
+      </body>
+      </html>
+    `);
+  }
+
   res.json({
     status: waConnectionStatus,
     isConnected: waConnectionStatus === "connected",
@@ -568,14 +659,58 @@ app.get("/pair", (req, res) => {
   });
 });
 
+// API: Force Reset Session Endpoint
+const handleResetSession = async (req: express.Request, res: express.Response) => {
+  try {
+    console.log("🔄 [API] Force session reset requested...");
+    if (waSock) {
+      try {
+        waSock.end(undefined);
+      } catch (e) {}
+      waSock = null;
+    }
+    waConnectionStatus = "disconnected";
+    isConnecting = false;
+    currentQrCode = null;
+    currentPairingCode = null;
+    pairingError = null;
+
+    await clearStoredSession();
+
+    if (req.headers.accept?.includes("text/html") || req.headers["content-type"] === "application/x-www-form-urlencoded") {
+      return res.redirect("/pair?format=html&reset=true");
+    }
+
+    res.json({
+      success: true,
+      message: "تم مسح بيانات الجلسة بنجاح وإعادة ضبط حالة الاتصال. جاهز لاقتران جديد.",
+      status: waConnectionStatus,
+    });
+  } catch (err: any) {
+    console.error("Error resetting session:", err);
+    res.status(500).json({ error: err?.message || "فشل مسح الجلسة" });
+  }
+};
+
+app.get("/api/reset-session", handleResetSession);
+app.post("/api/reset-session", handleResetSession);
+
 // API: Generate WhatsApp Pairing Code via Direct API (/pair)
 app.post("/pair", async (req, res) => {
   try {
     const phoneNumber = req.body.phoneNumber || req.body.phone;
     if (!phoneNumber) {
+      if (req.headers.accept?.includes("text/html")) {
+        return res.redirect("/pair?error=missing_phone");
+      }
       return res.status(400).json({ error: "رقم الهاتف مطلوب" });
     }
     const code = await generatePairingCode(phoneNumber);
+
+    if (req.headers.accept?.includes("text/html") || req.headers["content-type"] === "application/x-www-form-urlencoded") {
+      return res.redirect("/pair?format=html");
+    }
+
     res.json({
       success: true,
       pairingCode: code,
@@ -585,6 +720,9 @@ app.post("/pair", async (req, res) => {
   } catch (error: any) {
     console.error("Pairing API error:", error);
     pairingError = error?.message || "حدث خطأ أثناء توليد الكود";
+    if (req.headers.accept?.includes("text/html")) {
+      return res.redirect("/pair?format=html");
+    }
     res.status(500).json({ error: pairingError });
   }
 });
