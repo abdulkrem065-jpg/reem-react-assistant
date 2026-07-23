@@ -1,6 +1,6 @@
 {
   "name": "Reem Assistant",
   "description": "Smart out-of-hours AI customer assistant with a built-in CRM dashboard, automated quote calculations, and Google Calendar integrations.",
-  "requestFramePermissions": [],
+  "requestFramePermissions": ["microphone"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

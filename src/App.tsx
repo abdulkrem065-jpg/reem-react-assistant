@@ -30,9 +30,13 @@ import {
   Briefcase,
   ExternalLink,
   MessageCircle,
-  HelpCircle
+  HelpCircle,
+  Sparkles,
+  Radio,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
+
+import { GeminiChatbot } from "./components/GeminiChatbot";
 
 import { Lead, KBItem, CompanyConfig, CalendarEvent, Role, Theme, Language } from "./types";
 import { translations } from "./data/translations";
@@ -750,6 +754,17 @@ export default function App() {
           </button>
 
           <button
+            onClick={() => setActiveTab("gemini_chat")}
+            className={`w-full text-start p-2 rounded-lg flex items-center justify-between transition-all text-xs font-medium ${activeTab === "gemini_chat" ? "bg-emerald-500 text-white shadow-xs" : "bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300"}`}
+          >
+            <span className="flex items-center gap-2">
+              <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+              شات Gemini المطور
+            </span>
+            <span className="bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-400 text-[9px] px-1.5 py-0.5 rounded-md font-bold">PRO</span>
+          </button>
+
+          <button
             onClick={() => setActiveTab("crm")}
             className={`w-full text-start p-2 rounded-lg flex items-center justify-between transition-all text-xs font-medium ${activeTab === "crm" ? "bg-emerald-500 text-white shadow-xs" : "bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300"}`}
           >
@@ -854,6 +869,13 @@ export default function App() {
             )}
           </AnimatePresence>
 
+          {/* TAB 0: GEMINI CHATBOT WITH GROUNDING AND VOICE */}
+          {activeTab === "gemini_chat" && (
+            <div className="space-y-3">
+              <GeminiChatbot companyConfig={companyConfig} knowledgeBase={kbItems} />
+            </div>
+          )}
+
           {/* TAB 1: REEM AI ASSISTANT SIMULATOR */}
           {activeTab === "assistant" && (
             <div className="space-y-3">
@@ -870,7 +892,7 @@ export default function App() {
                 </div>
 
                 {/* Toggles between Voice Call and Text Chat simulation */}
-                <div className="flex bg-slate-100 dark:bg-slate-800 rounded-lg p-0.5 border border-slate-200 dark:border-slate-700 text-[11px]">
+                <div className="flex bg-slate-100 dark:bg-slate-800 rounded-lg p-0.5 border border-slate-200 dark:border-slate-700 text-[11px] flex-wrap gap-1">
                   <button
                     onClick={() => { setChatType("chat"); window.speechSynthesis.cancel(); }}
                     className={`px-3 py-1.5 rounded-md font-semibold transition-all flex items-center gap-1 ${chatType === "chat" ? "bg-white dark:bg-slate-700 shadow-xs text-emerald-500 dark:text-emerald-400" : "text-slate-600 dark:text-slate-400"}`}
@@ -884,6 +906,13 @@ export default function App() {
                   >
                     <Phone className="w-3.5 h-3.5" />
                     اتصال هاتفي
+                  </button>
+                  <button
+                    onClick={() => setActiveTab("gemini_chat")}
+                    className="px-3 py-1.5 rounded-md font-semibold transition-all flex items-center gap-1 bg-amber-500/10 text-amber-700 dark:text-amber-400 hover:bg-amber-500/20 border border-amber-500/30"
+                  >
+                    <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+                    شات Gemini المطور
                   </button>
                 </div>
               </div>

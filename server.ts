@@ -1,8 +1,10 @@
 import express from "express";
 import path from "path";
+import http from "http";
 import dotenv from "dotenv";
+import { WebSocketServer } from "ws";
 import { createServer as createViteServer } from "vite";
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI, Type, Modality } from "@google/genai";
 import makeWASocket, {
   DisconnectReason,
   useMultiFileAuthState,
@@ -158,10 +160,18 @@ async function connectToWhatsApp() {
   }
 }
 
-// API: Chat with Reem
+// API: Multi-turn Chat with Reem & Gemini (supports Search & Maps Grounding)
 app.post("/api/chat", async (req, res) => {
   try {
-    const { messages, companyConfig, knowledgeBase } = req.body;
+    const {
+      messages,
+      companyConfig,
+      knowledgeBase,
+      selectedModel,
+      useSearch,
+      useMaps,
+      customSystemInstruction,
+    } = req.body;
 
     if (!messages || !Array.isArray(messages)) {
       return res.status(400).json({ error: "Invalid messages format" });
@@ -172,7 +182,7 @@ app.post("/api/chat", async (req, res) => {
       .map((item: any) => `- ${item.name}: ${item.priceInfo} (${item.description || ""})`)
       .join("\n");
 
-    const systemInstruction = `
+    const defaultSystemInstruction = `
 أنت "ريم"، مساعدة ذكاء اصطناعي ذكية ومحترفة لشركة "${companyName}".
 مهمتك الأساسية هي الرد على تواصل العملاء خارج أوقات العمل الرسمية بنبرة ودودة، مهذبة ودافئة باللغة العربية الفصحى أو العامية المهذبة المفهومة.
 
@@ -193,9 +203,7 @@ app.post("/api/chat", async (req, res) => {
 
 📌 قواعد ذهبية لا تحيد عنها أبداً:
 - لا تفتعل معلومات أو خدمات أو أسعار غير موجودة في قاعدة المعرفة.
-- إذا سألك العميل عن شيء خارج نطاق معرفتك، قل بلطف: "هذا سؤال مهم، سأحوله للفريق المختص ليرد عليك خلال ساعات العمل الرسمية".
-- لا تقدم تخفيضات أو وعود غير مدروسة. العروض تقديرية فقط وليست ملزمة.
-- لا تطلب أبداً معلومات حساسة (مثل أرقام بطاقات الائتمان، الحسابات البنكية، أو كلمات المرور).
+- إذا كان التثبيت الميداني أو البحث على الويب مفعلاً، يمكنك استخدام أدوات البحث والخرائط الموفرة لإفادة العميل بأحدث المعلومات والأماكن الحقيقية.
 - التزم باللهجة العربية الودودة والمهذبة للغاية.
 
 🗂️ قاعدة المعرفة للخدمات والأسعار التقديرية:
@@ -206,6 +214,8 @@ ${kbText || `
 `}
 `;
 
+    const systemInstruction = customSystemInstruction || defaultSystemInstruction;
+
     // Transform messages to Gemini SDK contents format
     const contents = messages.map((msg: any) => {
       const role = msg.role === "user" ? "user" : "model";
@@ -215,20 +225,83 @@ ${kbText || `
       };
     });
 
+    // Configure tools for Search and Maps Grounding
+    const tools: any[] = [];
+    if (useSearch) {
+      tools.push({ googleSearch: {} });
+    } else if (useMaps) {
+      tools.push({ googleMaps: {} });
+    }
+
+    // Default to gemini-3.6-flash if model not explicitly specified
+    const targetModel = selectedModel || "gemini-3.6-flash";
+
     const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
+      model: targetModel,
       contents,
       config: {
         systemInstruction,
         temperature: 0.7,
+        ...(tools.length > 0 ? { tools } : {}),
       },
     });
 
     const text = response.text || "عذراً، لم أستطع معالجة الرد حالياً.";
-    res.json({ text });
+
+    // Extract grounding sources (Search or Maps)
+    const groundingChunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+    const groundingSources = groundingChunks
+      .map((chunk: any) => {
+        if (chunk.web) {
+          return { title: chunk.web.title || "رابط ويب", uri: chunk.web.uri, type: "web" };
+        }
+        if (chunk.maps) {
+          return { title: chunk.maps.title || "موقع على الخريطة", uri: chunk.maps.uri, type: "maps" };
+        }
+        if (chunk.entity) {
+          return { title: chunk.entity.title || "معلم جغرافي", uri: chunk.entity.uri, type: "entity" };
+        }
+        return null;
+      })
+      .filter(Boolean);
+
+    res.json({ text, groundingSources });
   } catch (error: any) {
     console.error("Gemini Chat API Error:", error);
     res.status(500).json({ error: error.message || "Internal Server Error" });
+  }
+});
+
+// API: Generate Text-To-Speech (TTS) using Gemini TTS Model
+app.post("/api/gemini/tts", async (req, res) => {
+  try {
+    const { text, voiceName } = req.body;
+    if (!text) {
+      return res.status(400).json({ error: "النص مطلوب لتحويله إلى صوت" });
+    }
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3.1-flash-tts-preview",
+      contents: [{ parts: [{ text: `تحدث بلغة عربية واضحة ولطيفة ومحترفة: ${text}` }] }],
+      config: {
+        responseModalities: [Modality.AUDIO],
+        speechConfig: {
+          voiceConfig: {
+            prebuiltVoiceConfig: { voiceName: voiceName || "Kore" },
+          },
+        },
+      },
+    });
+
+    const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+    if (!base64Audio) {
+      return res.status(500).json({ error: "فشل إنشاء الصوت عبر Gemini TTS" });
+    }
+
+    res.json({ audio: base64Audio });
+  } catch (error: any) {
+    console.error("Gemini TTS API Error:", error);
+    res.status(500).json({ error: error.message || "Failed to generate TTS audio" });
   }
 });
 
@@ -787,6 +860,77 @@ app.post("/api/whatsapp/send", async (req, res) => {
   }
 });
 
+// WebSocket setup for Gemini Live API real-time voice chat
+function setupLiveWebSocket(server: http.Server) {
+  const wss = new WebSocketServer({ server, path: "/live" });
+
+  wss.on("connection", async (ws) => {
+    console.log("⚡ Client connected to Gemini Live API WebSocket");
+    let session: any = null;
+
+    try {
+      session = await ai.live.connect({
+        model: "gemini-3.1-flash-live-preview",
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: "Kore" } },
+          },
+          systemInstruction: "أنتِ ريم المساعدة الذكية للعملاء. تتحدثين باللغة العربية بأسلوب راقٍ، ودود وموجز لإفادة العملاء وإجابة استفساراتهم صوتياً.",
+          inputAudioTranscription: {},
+          outputAudioTranscription: {},
+        },
+        callbacks: {
+          onmessage: (message: any) => {
+            const audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
+            if (audio) {
+              ws.send(JSON.stringify({ type: "audio", audio }));
+            }
+            const text = message.serverContent?.modelTurn?.parts?.[0]?.text;
+            if (text) {
+              ws.send(JSON.stringify({ type: "text", text }));
+            }
+            if (message.serverContent?.interrupted) {
+              ws.send(JSON.stringify({ type: "interrupted" }));
+            }
+          },
+          onclose: () => console.log("Gemini Live session closed"),
+          onerror: (err: any) => {
+            console.error("Gemini Live session error:", err);
+            ws.send(JSON.stringify({ type: "error", error: err?.message || "Live error" }));
+          },
+        },
+      });
+
+      ws.on("message", (data) => {
+        try {
+          const parsed = JSON.parse(data.toString());
+          if (parsed.audio && session) {
+            session.sendRealtimeInput({
+              audio: { data: parsed.audio, mimeType: "audio/pcm;rate=16000" },
+            });
+          } else if (parsed.text && session) {
+            session.sendRealtimeInput({ text: parsed.text });
+          }
+        } catch (e) {
+          console.error("Error parsing WebSocket message:", e);
+        }
+      });
+
+      ws.on("close", () => {
+        if (session) {
+          try {
+            session.close();
+          } catch (e) {}
+        }
+      });
+    } catch (err: any) {
+      console.error("Failed to connect Gemini Live session:", err);
+      ws.send(JSON.stringify({ type: "error", error: err.message || "Failed to start live session" }));
+    }
+  });
+}
+
 // Serve frontend assets
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
@@ -803,7 +947,10 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  const server = http.createServer(app);
+  setupLiveWebSocket(server);
+
+  server.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on port ${PORT}`);
     // Start Baileys connection on boot
     connectToWhatsApp();
