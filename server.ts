@@ -3,6 +3,13 @@ import path from "path";
 import dotenv from "dotenv";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
+import makeWASocket, {
+  DisconnectReason,
+  useMultiFileAuthState,
+  fetchLatestBaileysVersion,
+} from "@whiskeysockets/baileys";
+import qrcode from "qrcode-terminal";
+import pino from "pino";
 
 dotenv.config();
 
@@ -20,6 +27,125 @@ const ai = new GoogleGenAI({
 });
 
 app.use(express.json());
+
+// Baileys WhatsApp Connection State
+let waSock: ReturnType<typeof makeWASocket> | null = null;
+let waConnectionStatus: "connecting" | "connected" | "disconnected" = "disconnected";
+let currentQrCode: string | null = null;
+
+// Baileys WhatsApp Client Initialization
+async function connectToWhatsApp() {
+  try {
+    const { state, saveCreds } = await useMultiFileAuthState("baileys_auth_info");
+    const { version } = await fetchLatestBaileysVersion();
+
+    console.log(`Connecting to WhatsApp via Baileys (v${version.join(".")})...`);
+
+    const sock = makeWASocket({
+      version,
+      auth: state,
+      printQRInTerminal: false,
+      logger: pino({ level: "silent" }),
+    });
+
+    waSock = sock;
+
+    sock.ev.on("creds.update", saveCreds);
+
+    sock.ev.on("connection.update", (update) => {
+      const { connection, lastDisconnect, qr } = update;
+
+      if (qr) {
+        currentQrCode = qr;
+        console.log("\n==================================================");
+        console.log("📲 WHATSAPP QR CODE - SCAN WITH WHATSAPP APP:");
+        console.log("==================================================");
+        qrcode.generate(qr, { small: true });
+        console.log("==================================================\n");
+      }
+
+      if (connection === "close") {
+        waConnectionStatus = "disconnected";
+        const statusCode = (lastDisconnect?.error as any)?.output?.statusCode;
+        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+        console.log(`WhatsApp connection closed (Status code: ${statusCode}). Reconnecting: ${shouldReconnect}`);
+        if (shouldReconnect) {
+          setTimeout(connectToWhatsApp, 3000);
+        }
+      } else if (connection === "open") {
+        waConnectionStatus = "connected";
+        currentQrCode = null;
+        console.log("✅ WhatsApp Baileys connected successfully!");
+      } else if (connection === "connecting") {
+        waConnectionStatus = "connecting";
+      }
+    });
+
+    // Handle Incoming Messages with Anti-Group & Anti-Self Filter
+    sock.ev.on("messages.upsert", async (m) => {
+      if (m.type !== "notify") return;
+
+      for (const msg of m.messages) {
+        const remoteJid = msg.key.remoteJid;
+
+        // 3. Anti-Group & Anti-Self Filter
+        if (!remoteJid) continue;
+        if (msg.key.fromMe) continue; // Ignore messages sent by the bot itself
+        if (remoteJid.endsWith("@g.us")) continue; // Ignore group messages
+
+        // Extract message text from user
+        const userMessage =
+          msg.message?.conversation ||
+          msg.message?.extendedTextMessage?.text ||
+          msg.message?.imageMessage?.caption ||
+          msg.message?.videoMessage?.caption ||
+          "";
+
+        if (!userMessage || !userMessage.trim()) continue;
+
+        console.log(`📩 [WhatsApp Incoming] From: ${remoteJid}, Text: "${userMessage}"`);
+
+        try {
+          const systemInstruction = `
+أنت "ريم"، مساعدة ذكاء اصطناعي ذكية ومحترفة لشركة "التقنية الذكية".
+مهمتك الأساسية هي الرد على تواصل العملاء خارج أوقات العمل الرسمية بنبرة ودودة، مهذبة ودافئة باللغة العربية الفصحى أو العامية المهذبة المفهومة.
+
+🎯 أهدافك الأساسية:
+1. الترحيب بالعميل بحرارة واحترافية، والاعتذار بلطف عن عدم توفر الموظفين حالياً لأن الوقت خارج أوقات العمل الرسمية.
+2. فهم احتياج العميل بسرعة وتحديد الفئة: (استفسار عام، عرض سعر، شكوى، حجز موعد).
+3. تقديم عروض أسعار أولية ودقيقة.
+4. جمع بيانات العميل الأساسية (الاسم، رقم الجوال، البريد الإلكتروني، نوع الخدمة المطلوبة).
+5. إبلاغ العميل بأنه سيتم التواصل معه في أول يوم عمل لتأكيد التفاصيل.
+
+📌 قواعد مهمة:
+- حافظ على الردود موجزة ومناسبة لمحادثات الواتساب.
+- لا تفتعل معلومات أو أسعار غير صحيحة.
+- التزم باللهجة العربية الودودة والمهذبة.
+`;
+
+          const response = await ai.models.generateContent({
+            model: "gemini-2.5-flash",
+            contents: userMessage,
+            config: {
+              systemInstruction,
+              temperature: 0.7,
+            },
+          });
+
+          const botReply = response.text || "أهلاً بك! تم استلام رسالتك وسيتم المتابعة والرد عليك قريباً.";
+
+          // 4. Send Gemini reply directly via Baileys to WhatsApp user
+          await sock.sendMessage(remoteJid, { text: botReply });
+          console.log(`📤 [WhatsApp Reply Sent via Baileys] To: ${remoteJid}`);
+        } catch (err) {
+          console.error("Error processing Gemini response or sending via Baileys:", err);
+        }
+      }
+    });
+  } catch (err) {
+    console.error("Failed to connect Baileys WhatsApp socket:", err);
+  }
+}
 
 // API: Chat with Reem
 app.post("/api/chat", async (req, res) => {
@@ -173,78 +299,49 @@ ${kbText}
   }
 });
 
-// API: Send WhatsApp Message via Twilio
+// API: Check WhatsApp Baileys Connection Status & QR Code
+app.get("/api/whatsapp/status", (req, res) => {
+  res.json({
+    status: waConnectionStatus,
+    qr: currentQrCode,
+  });
+});
+
+// API: Send WhatsApp Message directly via Baileys
 app.post("/api/whatsapp/send", async (req, res) => {
   try {
-    const { to, message, credentials } = req.body;
-
-    const accountSid = credentials?.accountSid || process.env.TWILIO_ACCOUNT_SID;
-    const authToken = credentials?.authToken || process.env.TWILIO_AUTH_TOKEN;
-    const fromNumber = credentials?.fromNumber || process.env.TWILIO_FROM_NUMBER;
+    const { to, message } = req.body;
 
     if (!to || !message) {
       return res.status(400).json({ error: "الرجاء إدخال رقم المستلم ونص الرسالة." });
     }
 
-    if (!accountSid || !authToken || !fromNumber) {
-      return res.status(400).json({ 
-        error: "إعدادات Twilio غير مكتملة. يرجى إدخال الحساب (Account SID) والرمز (Auth Token) ورقم الإرسال في الإعدادات أو كمتغيرات بيئة." 
+    if (!waSock || waConnectionStatus !== "connected") {
+      return res.status(400).json({
+        error: "الواتساب غير متصل حالياً عبر Baileys. يرجى مسح رمز QR المطبوع في سجلات الخادم للتسجيل أولاً.",
       });
     }
 
-    // Clean phone number (must be international)
     let formattedTo = to.trim().replace(/\s+/g, "").replace(/[-()]/g, "");
-    if (!formattedTo.startsWith("+")) {
-      if (formattedTo.startsWith("00")) {
-        formattedTo = "+" + formattedTo.slice(2);
-      } else if (formattedTo.startsWith("05") || formattedTo.startsWith("5")) {
-        // Assume Saudi Arabia default country code if starts with 05 or 5
-        const cleanDigits = formattedTo.startsWith("0") ? formattedTo.slice(1) : formattedTo;
-        formattedTo = "+966" + cleanDigits;
-      } else {
-        formattedTo = "+" + formattedTo;
-      }
+    if (formattedTo.startsWith("+")) {
+      formattedTo = formattedTo.slice(1);
+    } else if (formattedTo.startsWith("00")) {
+      formattedTo = formattedTo.slice(2);
+    } else if (formattedTo.startsWith("05") || formattedTo.startsWith("5")) {
+      const cleanDigits = formattedTo.startsWith("0") ? formattedTo.slice(1) : formattedTo;
+      formattedTo = "966" + cleanDigits;
     }
 
-    const toWhatsapp = `whatsapp:${formattedTo}`;
-    const fromWhatsapp = fromNumber.startsWith("whatsapp:") ? fromNumber : `whatsapp:${fromNumber}`;
+    const jid = `${formattedTo}@s.whatsapp.net`;
+    await waSock.sendMessage(jid, { text: message });
 
-    const url = `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`;
-    const basicAuth = Buffer.from(`${accountSid}:${authToken}`).toString("base64");
-
-    const bodyParams = new URLSearchParams({
-      To: toWhatsapp,
-      From: fromWhatsapp,
-      Body: message
-    });
-
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Authorization": `Basic ${basicAuth}`,
-        "Content-Type": "application/x-www-form-urlencoded"
-      },
-      body: bodyParams.toString()
-    });
-
-    const data: any = await response.json();
-
-    if (!response.ok) {
-      console.error("Twilio API Error:", data);
-      return res.status(response.status).json({ 
-        error: data.message || "فشل إرسال رسالة الواتساب عبر Twilio." 
-      });
-    }
-
-    return res.json({ 
-      success: true, 
-      sid: data.sid, 
-      status: data.status,
-      message: "تم إرسال رسالة الواتساب بنجاح عبر Twilio!" 
+    return res.json({
+      success: true,
+      message: "تم إرسال رسالة الواتساب بنجاح عبر Baileys!",
     });
   } catch (error: any) {
-    console.error("WhatsApp Route Error:", error);
-    return res.status(500).json({ error: error.message || "حدث خطأ داخلي في الخادم." });
+    console.error("WhatsApp Baileys Send Error:", error);
+    return res.status(500).json({ error: error.message || "حدث خطأ أثناء إرسال الرسالة عبر Baileys." });
   }
 });
 
@@ -266,6 +363,8 @@ async function startServer() {
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on port ${PORT}`);
+    // Start Baileys connection on boot
+    connectToWhatsApp();
   });
 }
 
