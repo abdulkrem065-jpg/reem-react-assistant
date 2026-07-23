@@ -8,7 +8,8 @@ import makeWASocket, {
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
 } from "@whiskeysockets/baileys";
-import qrcode from "qrcode-terminal";
+import qrcodeTerminal from "qrcode-terminal";
+import QRCode from "qrcode";
 import pino from "pino";
 
 // Safe resolver for Baileys socket initialization across CJS/ESM runtimes
@@ -64,7 +65,7 @@ async function connectToWhatsApp() {
         console.log("\n==================================================");
         console.log("📲 WHATSAPP QR CODE - SCAN WITH WHATSAPP APP:");
         console.log("==================================================");
-        qrcode.generate(qr, { small: true });
+        qrcodeTerminal.generate(qr, { small: true });
         console.log("==================================================\n");
       }
 
@@ -309,6 +310,141 @@ app.get("/api/whatsapp/status", (req, res) => {
     status: waConnectionStatus,
     qr: currentQrCode,
   });
+});
+
+// API: Serve WhatsApp QR Code as PNG Image Buffer
+app.get("/api/whatsapp/qr.png", async (req, res) => {
+  try {
+    if (!currentQrCode) {
+      return res.status(404).send("QR code not generated yet or WhatsApp is already connected.");
+    }
+    const imageBuffer = await QRCode.toBuffer(currentQrCode, {
+      type: "png",
+      margin: 2,
+      width: 320,
+      color: {
+        dark: "#0F172A",
+        light: "#FFFFFF",
+      },
+    });
+    res.setHeader("Content-Type", "image/png");
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+    res.send(imageBuffer);
+  } catch (error) {
+    console.error("Error generating QR PNG:", error);
+    res.status(500).send("Error generating QR code image");
+  }
+});
+
+// Endpoint: HTML Page displaying clear WhatsApp QR Code for scanning
+app.get("/qr", async (req, res) => {
+  try {
+    let qrImgHtml = "";
+    if (waConnectionStatus === "connected") {
+      qrImgHtml = `
+        <div style="background:#D1FAE5; color:#065F46; padding:20px; border-radius:12px; text-align:center;">
+          <h2 style="margin:0 0 10px 0;">✅ الواتساب متصل بنجاح!</h2>
+          <p style="margin:0;">تم ربط الحساب بـ "ريم" بنجاح، البوت يعمل الآن وتلقي الرسائل مفعّل.</p>
+        </div>
+      `;
+    } else if (currentQrCode) {
+      const qrDataUrl = await QRCode.toDataURL(currentQrCode, { margin: 2, width: 320 });
+      qrImgHtml = `
+        <div style="text-align:center;">
+          <div style="background:#FFFFFF; padding:16px; display:inline-block; border-radius:16px; box-shadow:0 10px 25px -5px rgba(0,0,0,0.1); border:1px solid #E2E8F0;">
+            <img src="${qrDataUrl}" alt="WhatsApp QR Code" style="width:280px; height:280px; display:block;" />
+          </div>
+          <p style="margin-top:16px; color:#475569; font-size:14px; font-weight:600;">افتح تطبيق الواتساب على هاتفك > الأجهزة المرتبطة > ربط جهاز، وقم بمسح الرمز أعلاه</p>
+        </div>
+      `;
+    } else {
+      qrImgHtml = `
+        <div style="background:#FEF3C7; color:#92400E; padding:20px; border-radius:12px; text-align:center;">
+          <h3 style="margin:0 0 8px 0;">⏳ جاري تجهيز رمز QR...</h3>
+          <p style="margin:0;">يرجى الانتظار بضع ثوانٍ، سيتم تحديث الصفحة تلقائياً فور صدور الرمز.</p>
+        </div>
+      `;
+    }
+
+    const html = `
+      <!DOCTYPE html>
+      <html lang="ar" dir="rtl">
+      <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>ربط الواتساب - ريم المساعدة الذكية</title>
+
+        <meta http-equiv="refresh" content="5" />
+        <style>
+          body {
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background-color: #F8FAFC;
+            color: #0F172A;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 20px;
+          }
+          .card {
+            background: #FFFFFF;
+            width: 100%;
+            max-width: 440px;
+            padding: 32px 24px;
+            border-radius: 20px;
+            box-shadow: 0 20px 25px -5px rgba(0,0,0,0.05), 0 8px 10px -6px rgba(0,0,0,0.01);
+            border: 1px solid #E2E8F0;
+            text-align: center;
+          }
+          .badge {
+            display: inline-block;
+            padding: 6px 14px;
+            border-radius: 9999px;
+            font-size: 13px;
+            font-weight: 700;
+            margin-bottom: 20px;
+          }
+          .badge-connected { background-color: #DCFCE7; color: #166534; }
+          .badge-connecting { background-color: #FEF3C7; color: #92400E; }
+          .badge-disconnected { background-color: #FEE2E2; color: #991B1B; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <h1 style="font-size:22px; margin:0 0 8px 0; color:#0F172A;">📲 مسح رمز QR لربط الواتساب</h1>
+          <p style="color:#64748B; font-size:14px; margin-0 0 20px 0;">خدمة عملاء "ريم" - الاتصال المباشر عبر Baileys</p>
+          
+          <div class="badge ${
+            waConnectionStatus === "connected"
+              ? "badge-connected"
+              : waConnectionStatus === "connecting"
+              ? "badge-connecting"
+              : "badge-disconnected"
+          }">
+            حالة الاتصال: ${
+              waConnectionStatus === "connected"
+                ? "متصل 🟢"
+                : waConnectionStatus === "connecting"
+                ? "جاري الاتصال... 🟡"
+                : "غير متصل 🔴"
+            }
+          </div>
+
+          ${qrImgHtml}
+
+          <p style="margin-top:24px; color:#94A3B8; font-size:12px;">يتم تحديث هذه الصفحة تلقائياً كل 5 ثوانٍ</p>
+        </div>
+      </body>
+      </html>
+    `;
+
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.send(html);
+  } catch (error) {
+    console.error("Error rendering /qr route:", error);
+    res.status(500).send("Error rendering QR page");
+  }
 });
 
 // API: Send WhatsApp Message directly via Baileys
