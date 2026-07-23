@@ -81,13 +81,6 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
             )}
           </div>
 
-          <div className="p-3 bg-slate-100 dark:bg-slate-800/60 rounded-xl border border-slate-200/60 dark:border-slate-800 text-[11px] text-slate-600 dark:text-slate-400 flex items-center justify-between">
-            <span>💡 كلمة المرور الافتراضية:</span>
-            <code className="bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300 px-2 py-0.5 rounded-md font-mono font-bold">
-              {expectedPassword}
-            </code>
-          </div>
-
           <button
             type="submit"
             className="w-full py-3 bg-emerald-500 hover:bg-emerald-600 text-white font-bold rounded-xl text-sm flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/20 transition-all cursor-pointer"
