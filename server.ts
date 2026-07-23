@@ -2,9 +2,12 @@ import express from "express";
 import path from "path";
 import http from "http";
 import dotenv from "dotenv";
+import fs from "fs";
+import fsPromises from "fs/promises";
 import { WebSocketServer } from "ws";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type, Modality } from "@google/genai";
+import { Storage } from "@google-cloud/storage";
 import makeWASocket, {
   DisconnectReason,
   useMultiFileAuthState,
@@ -40,14 +43,103 @@ app.use(express.urlencoded({ extended: true }));
 // Baileys WhatsApp Connection State
 let waSock: ReturnType<typeof makeWASocket> | null = null;
 let waConnectionStatus: "connecting" | "connected" | "disconnected" = "disconnected";
+let isConnecting = false;
 let currentQrCode: string | null = null;
 let currentPairingCode: string | null = null;
 let currentPairingPhone: string | null = null;
 let pairingError: string | null = null;
 
-// Baileys WhatsApp Client Initialization
-async function connectToWhatsApp() {
+// Persistent Session Store Handler (Google Cloud Storage)
+const AUTH_DIR = path.join(process.cwd(), "baileys_auth_info");
+const GCS_BUCKET_NAME = process.env.GCS_BUCKET_NAME || (process.env.GOOGLE_CLOUD_PROJECT ? `${process.env.GOOGLE_CLOUD_PROJECT}-baileys-session` : "reem-baileys-session-store");
+
+let gcsStorage: Storage | null = null;
+try {
+  gcsStorage = new Storage();
+} catch (e) {
+  console.log("ℹ️ [GCS Session] Cloud Storage client initialized in fallback mode.");
+}
+
+// Restore auth state files from Cloud Storage on Cloud Run startup
+async function restoreSessionFromCloud() {
   try {
+    if (!fs.existsSync(AUTH_DIR)) {
+      await fsPromises.mkdir(AUTH_DIR, { recursive: true });
+    }
+
+    if (!gcsStorage) return;
+
+    const bucket = gcsStorage.bucket(GCS_BUCKET_NAME);
+    const [exists] = await bucket.exists().catch(() => [false]);
+    if (!exists) {
+      console.log(`ℹ️ [GCS Session] Storage bucket "${GCS_BUCKET_NAME}" will be created on initial session save.`);
+      return;
+    }
+
+    const [files] = await bucket.getFiles({ prefix: "baileys_auth_info/" });
+    if (!files || files.length === 0) {
+      console.log("ℹ️ [GCS Session] No stored session files found in Cloud Storage.");
+      return;
+    }
+
+    console.log(`📥 [GCS Session] Restoring ${files.length} Baileys auth files from Cloud Storage...`);
+    for (const file of files) {
+      const fileName = path.basename(file.name);
+      if (!fileName) continue;
+      const localFilePath = path.join(AUTH_DIR, fileName);
+      await file.download({ destination: localFilePath }).catch(() => {});
+    }
+    console.log("✅ [GCS Session] Successfully restored WhatsApp session from Cloud Storage!");
+  } catch (err) {
+    console.warn("⚠️ [GCS Session] Restore notice:", (err as any)?.message || err);
+  }
+}
+
+let saveDebounceTimer: NodeJS.Timeout | null = null;
+
+// Backup auth state files to Cloud Storage whenever updated
+async function backupSessionToCloud() {
+  if (saveDebounceTimer) clearTimeout(saveDebounceTimer);
+  saveDebounceTimer = setTimeout(async () => {
+    try {
+      if (!fs.existsSync(AUTH_DIR) || !gcsStorage) return;
+
+      const files = await fsPromises.readdir(AUTH_DIR);
+      if (files.length === 0) return;
+
+      const bucket = gcsStorage.bucket(GCS_BUCKET_NAME);
+      const [exists] = await bucket.exists().catch(() => [false]);
+      if (!exists) {
+        await bucket.create().catch(() => {});
+      }
+
+      for (const fileName of files) {
+        const localFilePath = path.join(AUTH_DIR, fileName);
+        const destination = `baileys_auth_info/${fileName}`;
+        await bucket.upload(localFilePath, {
+          destination,
+          resumable: false,
+        }).catch(() => {});
+      }
+      console.log(`📤 [GCS Session] Successfully backed up ${files.length} auth files to Cloud Storage.`);
+    } catch (err) {
+      console.warn("⚠️ [GCS Session] Backup notice:", (err as any)?.message || err);
+    }
+  }, 1500);
+}
+
+// Baileys WhatsApp Client Initialization with Persistent Session Store & Auto-Reconnect
+async function connectToWhatsApp() {
+  if (isConnecting) {
+    console.log("⏳ [Baileys] Connection attempt already in progress...");
+    return;
+  }
+  isConnecting = true;
+
+  try {
+    // 1. Restore persistent session files from Cloud Storage before reading auth state
+    await restoreSessionFromCloud();
+
     const { state, saveCreds } = await useMultiFileAuthState("baileys_auth_info");
     const { version } = await fetchLatestBaileysVersion();
 
@@ -63,9 +155,12 @@ async function connectToWhatsApp() {
 
     waSock = sock;
 
-    sock.ev.on("creds.update", saveCreds);
+    sock.ev.on("creds.update", async (creds) => {
+      await saveCreds();
+      await backupSessionToCloud();
+    });
 
-    sock.ev.on("connection.update", (update) => {
+    sock.ev.on("connection.update", async (update) => {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
@@ -79,18 +174,33 @@ async function connectToWhatsApp() {
 
       if (connection === "close") {
         waConnectionStatus = "disconnected";
+        isConnecting = false;
         const statusCode = (lastDisconnect?.error as any)?.output?.statusCode;
-        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-        console.log(`WhatsApp connection closed (Status code: ${statusCode}). Reconnecting: ${shouldReconnect}`);
-        if (shouldReconnect) {
-          setTimeout(connectToWhatsApp, 3000);
+        const isLoggedOut = statusCode === DisconnectReason.loggedOut || statusCode === 401;
+
+        console.log(`⚠️ [Baileys Disconnected] Status code: ${statusCode || "unknown"}. Logged out: ${isLoggedOut}`);
+
+        if (isLoggedOut) {
+          console.log("❌ Logged out from WhatsApp. Resetting current session...");
+          currentQrCode = null;
+          currentPairingCode = null;
+          waSock = null;
+        } else {
+          // Automatic Reconnect without clearing session state!
+          const reconnectDelay = (statusCode === DisconnectReason.restartRequired || statusCode === 515) ? 1000 : 3500;
+          console.log(`🔄 [Auto Reconnect] Automatically reconnecting Baileys in ${reconnectDelay}ms...`);
+          setTimeout(() => {
+            connectToWhatsApp();
+          }, reconnectDelay);
         }
       } else if (connection === "open") {
         waConnectionStatus = "connected";
+        isConnecting = false;
         currentQrCode = null;
         currentPairingCode = null;
         pairingError = null;
         console.log("✅ تم ربط ريم بنجاح! (WhatsApp Baileys connected successfully)");
+        await backupSessionToCloud();
       } else if (connection === "connecting") {
         waConnectionStatus = "connecting";
       }
@@ -158,9 +268,18 @@ async function connectToWhatsApp() {
       }
     });
   } catch (err) {
+    isConnecting = false;
     console.error("Failed to connect Baileys WhatsApp socket:", err);
   }
 }
+
+// Watchdog interval for auto-reconnect if socket drops
+setInterval(() => {
+  if (waConnectionStatus === "disconnected" && !isConnecting) {
+    console.log("🔍 [Watchdog] WhatsApp status is disconnected. Triggering auto-reconnect...");
+    connectToWhatsApp();
+  }
+}, 20000);
 
 // API: Multi-turn Chat with Reem & Gemini (supports Search & Maps Grounding)
 app.post("/api/chat", async (req, res) => {
